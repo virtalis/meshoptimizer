@@ -907,8 +907,28 @@ void processDev(const char* path)
 	if (!loadMesh(mesh, path))
 		return;
 
-	simplify(mesh, 0.01f);
-	simplifySloppy(mesh, 0.01f);
+	{
+		Mesh copy = mesh;
+		meshopt_optimizeVertexCache(&copy.indices[0], &copy.indices[0], copy.indices.size(), copy.vertices.size());
+		meshopt_optimizeVertexFetch(&copy.vertices[0], &copy.indices[0], copy.indices.size(), &copy.vertices[0], copy.vertices.size(), sizeof(Vertex));
+		encodeIndex(copy);
+	}
+
+	meshopt_optimizeVertexCache(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), mesh.vertices.size());
+
+	std::vector<unsigned int> strip(meshopt_stripifyBound(mesh.indices.size()));
+	strip.resize(meshopt_stripify(&strip[0], &mesh.indices[0], mesh.indices.size(), mesh.vertices.size()));
+
+	meshopt_optimizeVertexFetch(&mesh.vertices[0], &strip[0], strip.size(), &mesh.vertices[0], mesh.vertices.size(), sizeof(Vertex));
+
+	std::vector<unsigned char> sbuf(meshopt_encodeStripBufferBound(strip.size(), mesh.vertices.size()));
+	sbuf.resize(meshopt_encodeStripBuffer(&sbuf[0], sbuf.size(), &strip[0], strip.size(), mesh.indices.size() / 3));
+
+	size_t csize = compress(sbuf);
+
+	printf("StrpCodec: %.1f bits/triangle (post-deflate %.1f bits/triangle)\n",
+	       double(sbuf.size() * 8) / double(mesh.indices.size() / 3),
+	       double(csize * 8) / double(mesh.indices.size() / 3));
 }
 
 int main(int argc, char** argv)

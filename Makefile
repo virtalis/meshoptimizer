@@ -20,8 +20,8 @@ OBJECTS=$(LIBRARY_OBJECTS) $(DEMO_OBJECTS) $(ENCODER_OBJECTS)
 LIBRARY=$(BUILD)/libmeshoptimizer.a
 EXECUTABLE=$(BUILD)/meshoptimizer
 
-CFLAGS=-g -Wall -Wextra -Werror -std=c89
-CXXFLAGS=-g -Wall -Wextra -Wshadow -Wno-missing-field-initializers -Werror -std=c++98
+CFLAGS=-g -Wall -Wextra -std=c89
+CXXFLAGS=-g -Wall -Wextra -Wshadow -Wno-missing-field-initializers -std=c++98
 LDFLAGS=
 
 ifeq ($(config),iphone)

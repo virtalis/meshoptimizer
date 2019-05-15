@@ -12,6 +12,7 @@ set(SOURCES
     src/overdrawanalyzer.cpp
     src/overdrawoptimizer.cpp
     src/simplifier.cpp
+    src/stripcodec.cpp
     src/stripifier.cpp
     src/vcacheanalyzer.cpp
     src/vcacheoptimizer.cpp
