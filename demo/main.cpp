@@ -1049,9 +1049,10 @@ void processDev(const char* path)
 
 	size_t csize = compress(sbuf);
 
-	printf("StrpCodec: %.1f bits/triangle (post-deflate %.1f bits/triangle)\n",
+	printf("StrpCodec: %.1f bits/triangle (post-deflate %.1f bits/triangle); strip %d indices (%.1f%%)\n",
 	       double(sbuf.size() * 8) / double(mesh.indices.size() / 3),
-	       double(csize * 8) / double(mesh.indices.size() / 3));
+	       double(csize * 8) / double(mesh.indices.size() / 3),
+	       int(strip.size()), double(strip.size()) / double(mesh.indices.size()) * 100);
 }
 
 int main(int argc, char** argv)
