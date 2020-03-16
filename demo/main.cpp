@@ -1040,7 +1040,7 @@ void processDev(const char* path)
 	meshopt_optimizeVertexCacheStrip(&mesh.indices[0], &mesh.indices[0], mesh.indices.size(), mesh.vertices.size());
 
 	std::vector<unsigned int> strip(meshopt_stripifyBound(mesh.indices.size()));
-	strip.resize(meshopt_stripify(&strip[0], &mesh.indices[0], mesh.indices.size(), mesh.vertices.size()));
+	strip.resize(meshopt_stripify(&strip[0], &mesh.indices[0], mesh.indices.size(), mesh.vertices.size(), ~0u));
 
 	meshopt_optimizeVertexFetch(&mesh.vertices[0], &strip[0], strip.size(), &mesh.vertices[0], mesh.vertices.size(), sizeof(Vertex));
 
