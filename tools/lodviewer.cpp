@@ -1,7 +1,8 @@
 #define _CRT_SECURE_NO_WARNINGS
 
 #include "../src/meshoptimizer.h"
-#include "objparser.h"
+#include "../extern/fast_obj.h"
+#include "../extern/cgltf.h"
 
 #include <algorithm>
 #include <cmath>
@@ -10,11 +11,6 @@
 #include <vector>
 
 #include <GLFW/glfw3.h>
-
-#ifdef GLTF
-#define CGLTF_IMPLEMENTATION
-#include "cgltf.h"
-#endif
 
 #ifdef _WIN32
 #pragma comment(lib, "opengl32.lib")
@@ -53,6 +49,9 @@ struct Mesh
 	std::vector<Vertex> vertices;
 	std::vector<unsigned int> indices;
 
+	bool hasnormals;
+	bool hastexture;
+
 	// TODO: this is debug only visualization and will go away at some point
 	std::vector<unsigned char> kinds;
 	std::vector<unsigned int> loop;
@@ -60,40 +59,63 @@ struct Mesh
 
 Mesh parseObj(const char* path)
 {
-	ObjFile file;
-
-	if (!objParseFile(file, path) || !objValidate(file))
+	fastObjMesh* obj = fast_obj_read(path);
+	if (!obj)
 	{
-		printf("Error loading %s\n", path);
+		printf("Error loading %s: file not found\n", path);
 		return Mesh();
 	}
 
-	size_t total_indices = file.f_size / 3;
+	size_t total_indices = 0;
+
+	for (unsigned int i = 0; i < obj->face_count; ++i)
+		total_indices += 3 * (obj->face_vertices[i] - 2);
 
 	std::vector<Vertex> vertices(total_indices);
 
-	for (size_t i = 0; i < total_indices; ++i)
+	size_t vertex_offset = 0;
+	size_t index_offset = 0;
+
+	bool hasnormals = false;
+	bool hastexture = false;
+
+	for (unsigned int i = 0; i < obj->face_count; ++i)
 	{
-		int vi = file.f[i * 3 + 0];
-		int vti = file.f[i * 3 + 1];
-		int vni = file.f[i * 3 + 2];
+		for (unsigned int j = 0; j < obj->face_vertices[i]; ++j)
+		{
+			fastObjIndex gi = obj->indices[index_offset + j];
 
-		Vertex v =
-		    {
-		        file.v[vi * 3 + 0],
-		        file.v[vi * 3 + 1],
-		        file.v[vi * 3 + 2],
+			Vertex v =
+			{
+				obj->positions[gi.p * 3 + 0],
+				obj->positions[gi.p * 3 + 1],
+				obj->positions[gi.p * 3 + 2],
+				obj->normals[gi.n * 3 + 0],
+				obj->normals[gi.n * 3 + 1],
+				obj->normals[gi.n * 3 + 2],
+				obj->texcoords[gi.t * 2 + 0],
+				obj->texcoords[gi.t * 2 + 1],
+			};
 
-		        vni >= 0 ? file.vn[vni * 3 + 0] : 0,
-		        vni >= 0 ? file.vn[vni * 3 + 1] : 0,
-		        vni >= 0 ? file.vn[vni * 3 + 2] : 0,
+			hasnormals |= (gi.n > 0);
+			hastexture |= (gi.t > 0);
 
-		        vti >= 0 ? file.vt[vti * 3 + 0] : 0,
-		        vti >= 0 ? file.vt[vti * 3 + 1] : 0,
-		    };
+			// triangulate polygon on the fly; offset-3 is always the first polygon vertex
+			if (j >= 3)
+			{
+				vertices[vertex_offset + 0] = vertices[vertex_offset - 3];
+				vertices[vertex_offset + 1] = vertices[vertex_offset - 1];
+				vertex_offset += 2;
+			}
 
-		vertices[i] = v;
+			vertices[vertex_offset] = v;
+			vertex_offset++;
+		}
+
+		index_offset += obj->face_vertices[i];
 	}
+
+	fast_obj_destroy(obj);
 
 	Mesh result;
 
@@ -106,10 +128,12 @@ Mesh parseObj(const char* path)
 	result.vertices.resize(total_vertices);
 	meshopt_remapVertexBuffer(&result.vertices[0], &vertices[0], total_indices, sizeof(Vertex), &remap[0]);
 
+	result.hasnormals = hasnormals;
+	result.hastexture = hastexture;
+
 	return result;
 }
 
-#ifdef GLTF
 cgltf_accessor* getAccessor(const cgltf_attribute* attributes, size_t attribute_count, cgltf_attribute_type type, int index = 0)
 {
 	for (size_t i = 0; i < attribute_count; ++i)
@@ -117,15 +141,6 @@ cgltf_accessor* getAccessor(const cgltf_attribute* attributes, size_t attribute_
 			return attributes[i].data;
 
 	return 0;
-}
-
-template <typename T>
-const T* getComponentPtr(const cgltf_accessor* a)
-{
-	const char* buffer = (char*)a->buffer_view->buffer->data;
-	size_t offset = a->offset + a->buffer_view->offset;
-
-	return reinterpret_cast<const T*>(&buffer[offset]);
 }
 
 Mesh parseGltf(const char* path)
@@ -185,6 +200,9 @@ Mesh parseGltf(const char* path)
 	size_t vertex_offset = 0;
 	size_t index_offset = 0;
 
+	bool hasnormals = false;
+	bool hastexture = false;
+
 	for (size_t ni = 0; ni < data->nodes_count; ++ni)
 	{
 		if (!data->nodes[ni].mesh)
@@ -205,62 +223,57 @@ Mesh parseGltf(const char* path)
 			if (!ai || !ap)
 				continue;
 
-			if (ai->component_type == cgltf_component_type_r_32u)
-			{
-				const unsigned int* ptr = getComponentPtr<unsigned int>(ai);
-
-				for (size_t i = 0; i < ai->count; ++i)
-					result.indices[index_offset + i] = unsigned(vertex_offset + ptr[i]);
-			}
-			else
-			{
-				const unsigned short* ptr = getComponentPtr<unsigned short>(ai);
-
-				for (size_t i = 0; i < ai->count; ++i)
-					result.indices[index_offset + i] = unsigned(vertex_offset + ptr[i]);
-			}
+			for (size_t i = 0; i < ai->count; ++i)
+				result.indices[index_offset + i] = unsigned(vertex_offset + cgltf_accessor_read_index(ai, i));
 
 			{
-				const float* ptr = getComponentPtr<float>(ap);
-
 				for (size_t i = 0; i < ap->count; ++i)
 				{
+					float ptr[3];
+					cgltf_accessor_read_float(ap, i, ptr, 3);
+
 					result.vertices[vertex_offset + i].px = ptr[0] * transform[0] + ptr[1] * transform[4] + ptr[2] * transform[8] + transform[12];
 					result.vertices[vertex_offset + i].py = ptr[0] * transform[1] + ptr[1] * transform[5] + ptr[2] * transform[9] + transform[13];
 					result.vertices[vertex_offset + i].pz = ptr[0] * transform[2] + ptr[1] * transform[6] + ptr[2] * transform[10] + transform[14];
-					ptr += ap->stride / 4;
 				}
 			}
 
 			if (cgltf_accessor* an = getAccessor(primitive.attributes, primitive.attributes_count, cgltf_attribute_type_normal))
 			{
-				const float* ptr = getComponentPtr<float>(an);
-
 				for (size_t i = 0; i < ap->count; ++i)
 				{
+					float ptr[3];
+					cgltf_accessor_read_float(an, i, ptr, 3);
+
 					result.vertices[vertex_offset + i].nx = ptr[0] * transform[0] + ptr[1] * transform[4] + ptr[2] * transform[8];
 					result.vertices[vertex_offset + i].ny = ptr[0] * transform[1] + ptr[1] * transform[5] + ptr[2] * transform[9];
 					result.vertices[vertex_offset + i].nz = ptr[0] * transform[2] + ptr[1] * transform[6] + ptr[2] * transform[10];
-					ptr += an->stride / 4;
 				}
+
+				hasnormals = true;
 			}
 
 			if (cgltf_accessor* at = getAccessor(primitive.attributes, primitive.attributes_count, cgltf_attribute_type_texcoord))
 			{
-				const float* ptr = getComponentPtr<float>(at);
-
 				for (size_t i = 0; i < ap->count; ++i)
 				{
+					float ptr[2];
+					cgltf_accessor_read_float(at, i, ptr, 2);
+
 					result.vertices[vertex_offset + i].tx = ptr[0];
 					result.vertices[vertex_offset + i].ty = ptr[1];
-					ptr += at->stride / 4;
 				}
+
+				hastexture = true;
 			}
 
 			vertex_offset += ap->count;
 			index_offset += ai->count;
 		}
 	}
+
+	result.hasnormals = hasnormals;
+	result.hastexture = hastexture;
 
 	std::vector<unsigned int> remap(total_indices);
 	size_t unique_vertices = meshopt_generateVertexRemap(&remap[0], &result.indices[0], total_indices, &result.vertices[0], total_vertices, sizeof(Vertex));
@@ -274,17 +287,14 @@ Mesh parseGltf(const char* path)
 
 	return result;
 }
-#endif
 
 Mesh loadMesh(const char* path)
 {
 	if (strstr(path, ".obj"))
 		return parseObj(path);
 
-#ifdef GLTF
 	if (strstr(path, ".gltf") || strstr(path, ".glb"))
 		return parseGltf(path);
-#endif
 
 	return Mesh();
 }
@@ -302,8 +312,12 @@ bool saveObj(const Mesh& mesh, const char* path)
 	for (size_t i = 0; i < vertcount; ++i)
 	{
 		fprintf(obj, "v %f %f %f\n", verts[i].px, verts[i].py, verts[i].pz);
-		fprintf(obj, "vn %f %f %f\n", verts[i].nx, verts[i].ny, verts[i].nz);
-		fprintf(obj, "vt %f %f %f\n", verts[i].tx, verts[i].ty, 0.f);
+
+		if (mesh.hasnormals)
+			fprintf(obj, "vn %f %f %f\n", verts[i].nx, verts[i].ny, verts[i].nz);
+
+		if (mesh.hastexture)
+			fprintf(obj, "vt %f %f %f\n", verts[i].tx, verts[i].ty, 0.f);
 	}
 
 	for (size_t i = 0; i < tris.size(); i += 3)
@@ -312,7 +326,14 @@ bool saveObj(const Mesh& mesh, const char* path)
 		unsigned int i1 = tris[i + 1] + 1;
 		unsigned int i2 = tris[i + 2] + 1;
 
-		fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+		if (mesh.hasnormals && mesh.hastexture)
+			fprintf(obj, "f %d/%d/%d %d/%d/%d %d/%d/%d\n", i0, i0, i0, i1, i1, i1, i2, i2, i2);
+		else if (mesh.hasnormals && !mesh.hastexture)
+			fprintf(obj, "f %d//%d %d//%d %d//%d\n", i0, i0, i1, i1, i2, i2);
+		else if (!mesh.hasnormals && mesh.hastexture)
+			fprintf(obj, "f %d/%d %d/%d %d/%d\n", i0, i0, i1, i1, i2, i2);
+		else
+			fprintf(obj, "f %d %d %dd\n", i0, i1, i2);
 	}
 
 	fclose(obj);
@@ -334,6 +355,57 @@ Mesh optimize(const Mesh& mesh, int lod)
 	result.indices.resize(meshopt_simplify(&result.indices[0], &result.indices[0], mesh.indices.size(), &mesh.vertices[0].px, mesh.vertices.size(), sizeof(Vertex), target_index_count, target_error));
 
 	return result;
+}
+
+void computeNormals(Mesh& mesh)
+{
+	if (mesh.hasnormals)
+		return;
+
+	for (size_t i = 0; i < mesh.vertices.size(); ++i)
+	{
+		Vertex& v = mesh.vertices[i];
+
+		v.nx = v.ny = v.nz = 0.f;
+	}
+
+	for (size_t i = 0; i < mesh.indices.size(); i += 3)
+	{
+		Vertex& v0 = mesh.vertices[mesh.indices[i + 0]];
+		Vertex& v1 = mesh.vertices[mesh.indices[i + 1]];
+		Vertex& v2 = mesh.vertices[mesh.indices[i + 2]];
+
+		float v10[3] = {v1.px - v0.px, v1.py - v0.py, v1.pz - v0.pz};
+		float v20[3] = {v2.px - v0.px, v2.py - v0.py, v2.pz - v0.pz};
+
+		float normalx = v10[1] * v20[2] - v10[2] * v20[1];
+		float normaly = v10[2] * v20[0] - v10[0] * v20[2];
+		float normalz = v10[0] * v20[1] - v10[1] * v20[0];
+
+		v0.nx += normalx;
+		v0.ny += normaly;
+		v0.nz += normalz;
+
+		v1.nx += normalx;
+		v1.ny += normaly;
+		v1.nz += normalz;
+
+		v2.nx += normalx;
+		v2.ny += normaly;
+		v2.nz += normalz;
+	}
+
+	for (size_t i = 0; i < mesh.vertices.size(); ++i)
+	{
+		Vertex& v = mesh.vertices[i];
+
+		float nl = sqrtf(v.nx * v.nx + v.ny * v.ny + v.nz * v.nz);
+		float ns = (nl == 0.f) ? 0.f : 1.f / nl;
+
+		v.nx *= ns;
+		v.ny *= ns;
+		v.nz *= ns;
+	}
 }
 
 void display(int x, int y, int width, int height, const Mesh& mesh, const Options& options)
@@ -618,6 +690,9 @@ int main(int argc, char** argv)
 				File& f = files[i];
 				int x = int(i) % cols;
 				int y = int(i) / cols;
+
+				if (options.mode == Options::Mode_Normals)
+					computeNormals(f.lodmesh);
 
 				display(x * tilew, y * tileh, tilew, tileh, f.lodmesh, options);
 			}
