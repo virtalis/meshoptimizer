@@ -68,7 +68,7 @@ void benchCodecs(const std::vector<Vertex>& vertices, const std::vector<unsigned
 
 			double GB = 1024 * 1024 * 1024;
 
-			printf("decode: vertex %.2f ms (%.2f GB/sec)\n",
+			printf("decode: vertex %.3f ms (%.3f GB/sec)\n",
 				(t1 - t0) * 1000, double(vertices.size() * sizeof(Vertex)) / GB / (t1 - t0));
 		}
 	}

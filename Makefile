@@ -118,6 +118,14 @@ codecbitmask-emulated.js: tools/codecbitmask.cpp ${LIBRARY_SOURCES}
 	emcc $^ -O3 -DNDEBUG -s TOTAL_MEMORY=268435456 -msimd128 -o codecbitmask-emulated.wasm
 	sed -i "s#\(var wasm = \)\".*\";#\\1\"$$(cat codecbitmask-emulated.wasm | hexdump -v -e '1/1 "%02X"')\";#" $@
 
+searchbitmask-native.js: tools/searchbitmask.cpp
+	emcc $^ -O3 -DNDEBUG -DBITMASK -s TOTAL_MEMORY=268435456 -msimd128 -o searchbitmask-native.wasm
+	sed -i "s#\(var wasm = \)\".*\";#\\1\"$$(cat searchbitmask-native.wasm | hexdump -v -e '1/1 "%02X"')\";#" $@
+
+searchbitmask-emulated.js: tools/searchbitmask.cpp
+	emcc $^ -O3 -DNDEBUG -s TOTAL_MEMORY=268435456 -msimd128 -o searchbitmask-emulated.wasm
+	sed -i "s#\(var wasm = \)\".*\";#\\1\"$$(cat searchbitmask-emulated.wasm | hexdump -v -e '1/1 "%02X"')\";#" $@
+
 $(LIBRARY): $(LIBRARY_OBJECTS)
 	ar rcs $@ $^
 
