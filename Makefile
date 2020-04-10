@@ -110,6 +110,14 @@ codecbench.js codecbench.wasm: tools/codecbench.cpp ${LIBRARY_SOURCES}
 codecbench-simd.js codecbench-simd.wasm: tools/codecbench.cpp ${LIBRARY_SOURCES}
 	emcc $^ -O3 -DNDEBUG -s TOTAL_MEMORY=268435456 -msimd128 -o $@
 
+codecbitmask-native.js: tools/codecbitmask.cpp ${LIBRARY_SOURCES}
+	emcc $^ -O3 -DNDEBUG -DBITMASK -s TOTAL_MEMORY=268435456 -msimd128 -o codecbitmask-native.wasm
+	sed -i "s#\(var wasm = \)\".*\";#\\1\"$$(cat codecbitmask-native.wasm | hexdump -v -e '1/1 "%02X"')\";#" $@
+
+codecbitmask-emulated.js: tools/codecbitmask.cpp ${LIBRARY_SOURCES}
+	emcc $^ -O3 -DNDEBUG -s TOTAL_MEMORY=268435456 -msimd128 -o codecbitmask-emulated.wasm
+	sed -i "s#\(var wasm = \)\".*\";#\\1\"$$(cat codecbitmask-emulated.wasm | hexdump -v -e '1/1 "%02X"')\";#" $@
+
 $(LIBRARY): $(LIBRARY_OBJECTS)
 	ar rcs $@ $^
 

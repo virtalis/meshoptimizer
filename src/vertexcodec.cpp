@@ -85,9 +85,16 @@
 #if defined(SIMD_WASM)
 // v128_t wasm_v8x16_swizzle(v128_t a, v128_t b)
 SIMD_TARGET
-static __inline__ v128_t __DEFAULT_FN_ATTRS wasm_v8x16_swizzle(v128_t a, v128_t b)
+static inline v128_t wasm_v8x16_swizzle(v128_t a, v128_t b)
 {
 	return (v128_t)__builtin_wasm_swizzle_v8x16((__i8x16)a, (__i8x16)b);
+}
+
+// int wasm_v8x16_bitmask(v128_t a)
+SIMD_TARGET
+static inline int wasm_v8x16_bitmask(v128_t a)
+{
+	return __builtin_wasm_bitmask_i8x16((__i8x16)a);
 }
 #endif
 
@@ -745,6 +752,7 @@ static v128_t decodeShuffleMask(unsigned char mask0, unsigned char mask1)
 SIMD_TARGET
 static void wasmMoveMask(v128_t mask, unsigned char& mask0, unsigned char& mask1)
 {
+#ifndef BITMASK
 	v128_t mask_0 = wasm_v32x4_shuffle(mask, mask, 0, 2, 1, 3);
 
 	// TODO: when Chrome supports v128.const we can try doing vectorized and?
@@ -757,6 +765,12 @@ static void wasmMoveMask(v128_t mask, unsigned char& mask0, unsigned char& mask1
 
 	mask0 = uint8_t(mask_8);
 	mask1 = uint8_t(mask_8 >> 32);
+#else
+	int mask16 = wasm_v8x16_bitmask(mask);
+
+	mask0 = uint8_t(mask16);
+	mask1 = uint8_t(mask16 >> 8);
+#endif
 }
 
 SIMD_TARGET
