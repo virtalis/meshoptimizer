@@ -965,6 +965,32 @@ struct TriangleHasher
 	}
 };
 
+struct Triangle
+{
+	unsigned int a;
+	unsigned int b;
+	unsigned int c;
+
+	bool operator==(const Triangle& rhs) const
+	{
+		return a == rhs.a && b == rhs.b && c == rhs.c;
+	}
+};
+
+struct MemorylessTriangleHasher
+{
+	size_t hash(const Triangle& tri) const
+	{
+		// Optimized Spatial Hashing for Collision Detection of Deformable Objects
+		return (tri.a * 73856093) ^ (tri.b * 19349663) ^ (tri.c * 83492791);
+	}
+
+	bool equal(const Triangle& lhs, const Triangle& rhs) const
+	{
+		return lhs == rhs;
+	}
+};
+
 static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_positions, size_t vertex_count, int grid_size)
 {
 	assert(grid_size >= 1 && grid_size <= 1024);
@@ -982,17 +1008,46 @@ static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_pos
 	}
 }
 
-static size_t countTriangles(const unsigned int* vertex_ids, const unsigned int* indices, size_t index_count)
+static size_t countTriangles(Triangle* tritable, size_t tritable_size, const unsigned int* vertex_ids, const unsigned int* indices, size_t index_count)
 {
 	size_t result = 0;
 
+	memset(tritable, -1, tritable_size * sizeof(Triangle));
+	const Triangle invalid_triangle = {~0u, ~0u, ~0u};
+
+	MemorylessTriangleHasher hasher;
+
 	for (size_t i = 0; i < index_count; i += 3)
 	{
-		unsigned int id0 = vertex_ids[indices[i + 0]];
-		unsigned int id1 = vertex_ids[indices[i + 1]];
-		unsigned int id2 = vertex_ids[indices[i + 2]];
+		unsigned int a = vertex_ids[indices[i + 0]];
+		unsigned int b = vertex_ids[indices[i + 1]];
+		unsigned int c = vertex_ids[indices[i + 2]];
 
-		result += (id0 != id1) & (id0 != id2) & (id1 != id2);
+		// Check for degeneracy.
+		if (a != b && a != c && b != c)
+		{
+			// Sort IDs to ensure equivalent triangles compare equal.
+			if (b < a && b < c)
+			{
+				unsigned int t = a;
+				a = b, b = c, c = t;
+			}
+			else if (c < a && c < b)
+			{
+				unsigned int t = c;
+				c = b, b = a, a = t;
+			}
+
+			// Check if triangle has already been seen.
+			Triangle tri = {a, b, c};
+			Triangle* entry = hashLookup2(tritable, tritable_size, hasher, tri, invalid_triangle);
+
+			if (*entry == invalid_triangle)
+			{
+				*entry = tri;
+				++result;
+			}
+		}
 	}
 
 	return result;
@@ -1343,6 +1398,10 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 
 	unsigned int* vertex_ids = allocator.allocate<unsigned int>(vertex_count);
 
+	// allocate tritable to be used both for countTriangles (as Triangle*) and filterTriangles (as unsigned int*)
+	size_t tritable_mem_size = hashBuckets2(index_count / 3) * sizeof(Triangle);
+	unsigned char* tritable_mem = allocator.allocate<unsigned char>(tritable_mem_size);
+
 	const int kInterpolationPasses = 5;
 
 	// invariant: # of triangles in min_grid <= target_count
@@ -1364,7 +1423,8 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		grid_size = (grid_size <= min_grid) ? min_grid + 1 : (grid_size >= max_grid) ? max_grid - 1 : grid_size;
 
 		computeVertexIds(vertex_ids, vertex_positions, vertex_count, grid_size);
-		size_t triangles = countTriangles(vertex_ids, indices, index_count);
+		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, indices, index_count);
+		assert(triangles <= max_triangles);
 
 #if TRACE
 		printf("pass %d (%s): grid size %d, triangles %d, %s\n",
@@ -1420,11 +1480,11 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 
 	// collapse triangles!
 	// note that we need to filter out triangles that we've already output because we very frequently generate redundant triangles between cells :(
-	size_t tritable_size = hashBuckets2(min_triangles);
-	unsigned int* tritable = allocator.allocate<unsigned int>(tritable_size);
+	size_t filter_tritable_size = hashBuckets2(min_triangles);
+	assert(filter_tritable_size * sizeof(unsigned int) <= tritable_mem_size);
 
-	size_t write = filterTriangles(destination, tritable, tritable_size, indices, index_count, vertex_cells, cell_remap);
-	assert(write <= target_index_count);
+	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap);
+	assert(write == min_triangles * 3);
 
 #if TRACE
 	printf("result: %d cells, %d triangles (%d unfiltered)\n", int(cell_count), int(write / 3), int(min_triangles));
