@@ -991,10 +991,11 @@ struct MemorylessTriangleHasher
 	}
 };
 
-static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_positions, size_t vertex_count, int grid_size)
+static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_positions, const float* vertex_normals, size_t vertex_normals_stride, size_t vertex_count, int grid_size)
 {
-	assert(grid_size >= 1 && grid_size <= 1024);
+	assert(grid_size >= 1 && grid_size <= 256);
 	float cell_scale = float(grid_size - 1);
+	size_t normals_stride_floats = vertex_normals_stride / sizeof(float);
 
 	for (size_t i = 0; i < vertex_count; ++i)
 	{
@@ -1004,11 +1005,28 @@ static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_pos
 		int yi = int(v.y * cell_scale + 0.5f);
 		int zi = int(v.z * cell_scale + 0.5f);
 
-		vertex_ids[i] = (xi << 20) | (yi << 10) | zi;
+		if (vertex_normals)
+		{
+			// Split [-1, +1] into 3 regions, which seems to be enough to prevent issues.
+			// It's important that there isn't a region boundary at 0, because this would prevent
+			// nearly-parallel normals from being merged in more cases (assuming a roughly axis-aligned mesh).
+			const float* np = &vertex_normals[i * normals_stride_floats];
+			Vector3 n = {np[0], np[1], np[2]};
+			assert(fabsf(n.x * n.x + n.y * n.y + n.z * n.z - 1.f) < 1e-5f);
+			int xni = int((n.x + 1.f) * 1.5f - 1e-5);
+			int yni = int((n.y + 1.f) * 1.5f - 1e-5);
+			int zni = int((n.z + 1.f) * 1.5f - 1e-5);
+
+			vertex_ids[i] = (xni << 28) | (yni << 26) | (zni << 24) | (xi << 16) | (yi << 8) | zi;
+		}
+		else
+		{
+			vertex_ids[i] = (xi << 16) | (yi << 8) | zi;
+		}
 	}
 }
 
-static size_t countTriangles(Triangle* tritable, size_t tritable_size, const unsigned int* vertex_ids, const unsigned int* indices, size_t index_count)
+static size_t countTriangles(Triangle* tritable, size_t tritable_size, const unsigned int* vertex_ids, const unsigned int* vertex_ids_no_normals, const unsigned int* indices, size_t index_count)
 {
 	size_t result = 0;
 
@@ -1019,13 +1037,18 @@ static size_t countTriangles(Triangle* tritable, size_t tritable_size, const uns
 
 	for (size_t i = 0; i < index_count; i += 3)
 	{
-		unsigned int a = vertex_ids[indices[i + 0]];
-		unsigned int b = vertex_ids[indices[i + 1]];
-		unsigned int c = vertex_ids[indices[i + 2]];
+		// Use IDs based on position only to check for degeneracy.
+		unsigned int a2 = vertex_ids_no_normals[indices[i + 0]];
+		unsigned int b2 = vertex_ids_no_normals[indices[i + 1]];
+		unsigned int c2 = vertex_ids_no_normals[indices[i + 2]];
 
-		// Check for degeneracy.
-		if (a != b && a != c && b != c)
+		if (a2 != b2 && a2 != c2 && b2 != c2)
 		{
+			unsigned int a = vertex_ids[indices[i + 0]];
+			unsigned int b = vertex_ids[indices[i + 1]];
+			unsigned int c = vertex_ids[indices[i + 2]];
+			assert(a != b && a != c && b != c);
+
 			// Sort IDs to ensure equivalent triangles compare equal.
 			if (b < a && b < c)
 			{
@@ -1160,7 +1183,21 @@ static void fillCellRemap(unsigned int* cell_remap, float* cell_errors, size_t c
 	}
 }
 
-static size_t filterTriangles(unsigned int* destination, unsigned int* tritable, size_t tritable_size, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap)
+static void fillBasicCellRemap(unsigned int* cell_remap, size_t cell_count, const unsigned int* vertex_cells, size_t vertex_count)
+{
+	memset(cell_remap, -1, cell_count * sizeof(unsigned int));
+
+	for (size_t i = 0; i < vertex_count; ++i)
+	{
+		unsigned int cell = vertex_cells[i];
+		if (cell_remap[cell] == ~0u)
+		{
+			cell_remap[cell] = unsigned(i);
+		}
+	}
+}
+
+static size_t filterTriangles(unsigned int* destination, unsigned int* tritable, size_t tritable_size, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap, const unsigned int* vertex_ids_no_normals)
 {
 	TriangleHasher hasher = {destination};
 
@@ -1170,12 +1207,17 @@ static size_t filterTriangles(unsigned int* destination, unsigned int* tritable,
 
 	for (size_t i = 0; i < index_count; i += 3)
 	{
-		unsigned int c0 = vertex_cells[indices[i + 0]];
-		unsigned int c1 = vertex_cells[indices[i + 1]];
-		unsigned int c2 = vertex_cells[indices[i + 2]];
+		unsigned int id0 = vertex_ids_no_normals[indices[i + 0]];
+		unsigned int id1 = vertex_ids_no_normals[indices[i + 1]];
+		unsigned int id2 = vertex_ids_no_normals[indices[i + 2]];
 
-		if (c0 != c1 && c0 != c2 && c1 != c2)
+		if (id0 != id1 && id0 != id2 && id1 != id2)
 		{
+			unsigned int c0 = vertex_cells[indices[i + 0]];
+			unsigned int c1 = vertex_cells[indices[i + 1]];
+			unsigned int c2 = vertex_cells[indices[i + 2]];
+			assert(c0 != c1 && c0 != c2 && c1 != c2);
+
 			unsigned int a = cell_remap[c0];
 			unsigned int b = cell_remap[c1];
 			unsigned int c = cell_remap[c2];
@@ -1203,6 +1245,47 @@ static size_t filterTriangles(unsigned int* destination, unsigned int* tritable,
 	}
 
 	return result * 3;
+}
+
+static void reconcileVertexPositions(float* vertex_positions_data, size_t vertex_positions_stride, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap)
+{
+	unsigned int positions_stride_floats = (unsigned int)(vertex_positions_stride / sizeof(float));
+	for (size_t i = 0; i < index_count; ++i)
+	{
+		unsigned int vertex = indices[i];
+		unsigned int best_vertex = cell_remap[vertex_cells[vertex]];
+		memcpy(&vertex_positions_data[positions_stride_floats * vertex], &vertex_positions_data[positions_stride_floats * best_vertex], 3 * sizeof(float));
+	}
+}
+
+static void writeAverageNormals(float* vertex_normals, size_t vertex_normals_stride, Vector3* accumulation_buffer, const unsigned int* new_indices, size_t new_index_count, const unsigned int* original_indices, size_t original_index_count, const unsigned int* vertex_cells, size_t cell_count)
+{
+	// calculate new normals by taking the average of the normals that have been collapsed into one,
+	// weighted by the number of triangles using each one
+	unsigned int normals_stride_floats = (unsigned int)(vertex_normals_stride / sizeof(float));
+	memset(accumulation_buffer, 0, cell_count * sizeof(Vector3));
+	for (size_t i = 0; i < original_index_count; ++i)
+	{
+		unsigned int vertex = original_indices[i];
+		unsigned int cell = vertex_cells[vertex];
+		Vector3& n = accumulation_buffer[cell];
+		n.x += vertex_normals[vertex * normals_stride_floats + 0];
+		n.y += vertex_normals[vertex * normals_stride_floats + 1];
+		n.z += vertex_normals[vertex * normals_stride_floats + 2];
+	}
+
+	// assign new normals back to vertex_normals
+	for (size_t i = 0; i < new_index_count; ++i)
+	{
+		unsigned int vertex = new_indices[i];
+		unsigned int cell = vertex_cells[vertex];
+		Vector3& src = accumulation_buffer[cell];
+		normalize(src);
+		float* dst = &vertex_normals[vertex * normals_stride_floats];
+		dst[0] = src.x;
+		dst[1] = src.y;
+		dst[2] = src.z;
+	}
 }
 
 static float interpolate(float y, float x0, float y0, float x1, float y1, float x2, float y2)
@@ -1370,13 +1453,14 @@ size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, 
 	return result_count;
 }
 
-size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions_data, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count)
+size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, float* vertex_positions_data, float* vertex_normals, size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t target_index_count)
 {
 	using namespace meshopt;
 
 	assert(index_count % 3 == 0);
 	assert(vertex_positions_stride > 0 && vertex_positions_stride <= 256);
 	assert(vertex_positions_stride % sizeof(float) == 0);
+	assert(vertex_normals_stride % sizeof(float) == 0);
 	assert(target_index_count <= index_count);
 
 	// we expect to get ~2 triangles/vertex in the output
@@ -1397,6 +1481,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 #endif
 
 	unsigned int* vertex_ids = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* vertex_ids_no_normals = allocator.allocate<unsigned int>(vertex_count);
 
 	// allocate tritable to be used both for countTriangles (as Triangle*) and filterTriangles (as unsigned int*)
 	size_t tritable_mem_size = hashBuckets2(index_count / 3) * sizeof(Triangle);
@@ -1406,7 +1491,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 
 	// invariant: # of triangles in min_grid <= target_count
 	int min_grid = 0;
-	int max_grid = 1025;
+	int max_grid = 257;
 	size_t min_triangles = 0;
 	size_t max_triangles = index_count / 3;
 
@@ -1422,9 +1507,11 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		int grid_size = next_grid_size;
 		grid_size = (grid_size <= min_grid) ? min_grid + 1 : (grid_size >= max_grid) ? max_grid - 1 : grid_size;
 
-		computeVertexIds(vertex_ids, vertex_positions, vertex_count, grid_size);
-		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, indices, index_count);
-		assert(triangles <= max_triangles);
+		// Assign IDs to each vertex based on position only, and use this to count triangles.
+		computeVertexIds(vertex_ids, vertex_positions, vertex_normals, vertex_normals_stride, vertex_count, grid_size);
+		computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, 0, vertex_count, grid_size);
+		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, vertex_ids_no_normals, indices, index_count);
+		assert(triangles <= index_count / 3);
 
 #if TRACE
 		printf("pass %d (%s): grid size %d, triangles %d, %s\n",
@@ -1462,29 +1549,46 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	unsigned int* table = allocator.allocate<unsigned int>(table_size);
 
 	unsigned int* vertex_cells = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* vertex_cells_no_normals = allocator.allocate<unsigned int>(vertex_count);
 
-	computeVertexIds(vertex_ids, vertex_positions, vertex_count, min_grid);
+	computeVertexIds(vertex_ids, vertex_positions, vertex_normals, vertex_normals_stride, vertex_count, min_grid);
 	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count);
 
-	// build a quadric for each target cell
-	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count);
-	memset(cell_quadrics, 0, cell_count * sizeof(Quadric));
+	// TR: get IDs with no normals, so we can ensure vertices in the same spatial cell use the same position
+	//     (even if they have different normals).
+	//     Re-use table...
+	computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, 0, vertex_count, min_grid);
+	size_t cell_count_no_normals = fillVertexCells(table, table_size, vertex_cells_no_normals, vertex_ids_no_normals, vertex_count);
 
-	fillCellQuadrics(cell_quadrics, indices, index_count, vertex_positions, vertex_cells);
-
-	// for each target cell, find the vertex with the minimal error
+	// build the actual remap table by simply mapping vertices that share a cell (accounting for normals) to the first vertex in the cell
 	unsigned int* cell_remap = allocator.allocate<unsigned int>(cell_count);
-	float* cell_errors = allocator.allocate<float>(cell_count);
-
-	fillCellRemap(cell_remap, cell_errors, cell_count, vertex_cells, cell_quadrics, vertex_positions, vertex_count);
+	fillBasicCellRemap(cell_remap, cell_count, vertex_cells, vertex_count);
 
 	// collapse triangles!
 	// note that we need to filter out triangles that we've already output because we very frequently generate redundant triangles between cells :(
+	// TR: filter triangles with two or more verts in the same spatial cell, regardless of normals
 	size_t filter_tritable_size = hashBuckets2(min_triangles);
 	assert(filter_tritable_size * sizeof(unsigned int) <= tritable_mem_size);
 
-	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap);
+	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_ids_no_normals);
 	assert(write == min_triangles * 3);
+
+	// build a quadric for each target spatial cell (ignoring normals)
+	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count_no_normals);
+	memset(cell_quadrics, 0, cell_count_no_normals * sizeof(Quadric));
+	fillCellQuadrics(cell_quadrics, indices, index_count, vertex_positions, vertex_cells_no_normals);
+
+	// for each target spatial cell, find the vertex with the minimal error
+	unsigned int* cell_remap_no_normals = allocator.allocate<unsigned int>(cell_count_no_normals);
+	float* cell_errors = allocator.allocate<float>(cell_count_no_normals);
+	fillCellRemap(cell_remap_no_normals, cell_errors, cell_count_no_normals, vertex_cells_no_normals, cell_quadrics, vertex_positions, vertex_count);
+
+	// copy positions for unfiltered vertices based on the above remap
+	reconcileVertexPositions(vertex_positions_data, vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+
+	// average out normals that share a cell
+	Vector3* accumulation_buffer = allocator.allocate<Vector3>(cell_count);
+	writeAverageNormals(vertex_normals, vertex_normals_stride, accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
 
 #if TRACE
 	printf("result: %d cells, %d triangles (%d unfiltered)\n", int(cell_count), int(write / 3), int(min_triangles));
@@ -1542,7 +1646,7 @@ size_t meshopt_simplifyPoints(unsigned int* destination, const float* vertex_pos
 		int grid_size = next_grid_size;
 		grid_size = (grid_size <= min_grid) ? min_grid + 1 : (grid_size >= max_grid) ? max_grid - 1 : grid_size;
 
-		computeVertexIds(vertex_ids, vertex_positions, vertex_count, grid_size);
+		computeVertexIds(vertex_ids, vertex_positions, NULL, 0, vertex_count, grid_size);
 		size_t vertices = countVertexCells(table, table_size, vertex_ids, vertex_count);
 
 #if TRACE
@@ -1579,7 +1683,7 @@ size_t meshopt_simplifyPoints(unsigned int* destination, const float* vertex_pos
 	// build vertex->cell association by mapping all vertices with the same quantized position to the same cell
 	unsigned int* vertex_cells = allocator.allocate<unsigned int>(vertex_count);
 
-	computeVertexIds(vertex_ids, vertex_positions, vertex_count, min_grid);
+	computeVertexIds(vertex_ids, vertex_positions, NULL, 0, vertex_count, min_grid);
 	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count);
 
 	// build a quadric for each target cell
