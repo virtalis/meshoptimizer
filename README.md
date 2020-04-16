@@ -1,4 +1,25 @@
-# 🐇 meshoptimizer [![Actions Status](https://github.com/zeux/meshoptimizer/workflows/build/badge.svg)](https://github.com/zeux/meshoptimizer/actions) [![codecov.io](https://codecov.io/github/zeux/meshoptimizer/coverage.svg?branch=master)](https://codecov.io/github/zeux/meshoptimizer?branch=master) ![MIT](https://img.shields.io/badge/license-MIT-blue.svg) [![GitHub](https://img.shields.io/badge/repo-github-green.svg)](https://github.com/zeux/meshoptimizer)
+
+# 🐇 meshoptimizer
+
+## Virtalis fork:
+
+Fork of https://github.com/zeux/meshoptimizer/.
+
+Build using cmake as normal on Windows, and on Linux with:
+
+```
+CC=clang-6.0 CXX=clang++-6.0 cmake -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo -DBUILD_SHARED_LIBS=TRUE /path/to/source/code/meshoptimizer
+DESTDIR=. ninja install
+```
+
+Then publish the nuget package. This requires the build directories to be one directory level up from the source, but feel free to just change the nuspec file for your setup. It also requires you to generate a PAT on Azure with the Packaging (Read & write) permission.
+
+```
+nuget pack /path/to/source/code/meshoptimizer/meshoptimizer.nuspec
+nuget push MeshOptimizer.X.Y.Z.nupkg -Source https://pkgs.dev.azure.com/virtalis/_packaging/PlatformLibraries/nuget/v3/index.json -ApiKey your-api-key
+```
+
+See below for original readme.
 
 ## Purpose
 
