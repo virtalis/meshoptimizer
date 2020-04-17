@@ -1481,7 +1481,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 #endif
 
 	unsigned int* vertex_ids = allocator.allocate<unsigned int>(vertex_count);
-	unsigned int* vertex_ids_no_normals = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* vertex_ids_no_normals = vertex_normals ? allocator.allocate<unsigned int>(vertex_count) : vertex_ids;
 
 	// allocate tritable to be used both for countTriangles (as Triangle*) and filterTriangles (as unsigned int*)
 	size_t tritable_mem_size = hashBuckets2(index_count / 3) * sizeof(Triangle);
@@ -1507,9 +1507,12 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		int grid_size = next_grid_size;
 		grid_size = (grid_size <= min_grid) ? min_grid + 1 : (grid_size >= max_grid) ? max_grid - 1 : grid_size;
 
-		// Assign IDs to each vertex based on position only, and use this to count triangles.
+		// assign IDs to each vertex based on position only, and use this to count triangles.
 		computeVertexIds(vertex_ids, vertex_positions, vertex_normals, vertex_normals_stride, vertex_count, grid_size);
-		computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, 0, vertex_count, grid_size);
+		if (vertex_normals)
+		{
+			computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, 0, vertex_count, grid_size);
+		}
 		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, vertex_ids_no_normals, indices, index_count);
 		assert(triangles <= index_count / 3);
 
@@ -1549,29 +1552,38 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	unsigned int* table = allocator.allocate<unsigned int>(table_size);
 
 	unsigned int* vertex_cells = allocator.allocate<unsigned int>(vertex_count);
-	unsigned int* vertex_cells_no_normals = allocator.allocate<unsigned int>(vertex_count);
+	unsigned int* vertex_cells_no_normals = vertex_normals ? allocator.allocate<unsigned int>(vertex_count) : vertex_cells;
 
 	computeVertexIds(vertex_ids, vertex_positions, vertex_normals, vertex_normals_stride, vertex_count, min_grid);
 	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count);
+	size_t cell_count_no_normals = cell_count;
 
-	// TR: get IDs with no normals, so we can ensure vertices in the same spatial cell use the same position
-	//     (even if they have different normals).
-	//     Re-use table...
-	computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, 0, vertex_count, min_grid);
-	size_t cell_count_no_normals = fillVertexCells(table, table_size, vertex_cells_no_normals, vertex_ids_no_normals, vertex_count);
+	// branching code paths below based on whether or not we have normals:
+	//  - if we do have normals, then:
+	//    -- calculate a basic remap first that maps each vertex in a cell
+	//       to the first vertex in that cell. 
+	//    -- ignore normals when choosing the most representative vertex for each spatial cell
+	//    -- copy that vertex' position onto every normal that is in the same spatial cell.
+	//       This allows us to remove triangles between vertices that share a spatial cell but have
+	//       different normals.
+	//  - if we don't have normals, then:
+	//    -- calculate a remapping that maps each vertex in a cell to the representative vertex
+	//       for that cell
+	//    -- do not modify vertex_positions
 
-	// build the actual remap table by simply mapping vertices that share a cell (accounting for normals) to the first vertex in the cell
 	unsigned int* cell_remap = allocator.allocate<unsigned int>(cell_count);
-	fillBasicCellRemap(cell_remap, cell_count, vertex_cells, vertex_count);
 
-	// collapse triangles!
-	// note that we need to filter out triangles that we've already output because we very frequently generate redundant triangles between cells :(
-	// TR: filter triangles with two or more verts in the same spatial cell, regardless of normals
-	size_t filter_tritable_size = hashBuckets2(min_triangles);
-	assert(filter_tritable_size * sizeof(unsigned int) <= tritable_mem_size);
+	if (vertex_normals)
+	{
+		// get IDs with no normals, so we can ensure vertices in the same spatial cell use the same position
+		// (even if they have different normals).
+		// re-use table...
+		computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, 0, vertex_count, min_grid);
+		cell_count_no_normals = fillVertexCells(table, table_size, vertex_cells_no_normals, vertex_ids_no_normals, vertex_count);
 
-	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_ids_no_normals);
-	assert(write == min_triangles * 3);
+		// build the actual remap table by simply mapping vertices that share a cell (accounting for normals) to the first vertex in the cell
+		fillBasicCellRemap(cell_remap, cell_count, vertex_cells, vertex_count);
+	}
 
 	// build a quadric for each target spatial cell (ignoring normals)
 	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count_no_normals);
@@ -1579,16 +1591,28 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	fillCellQuadrics(cell_quadrics, indices, index_count, vertex_positions, vertex_cells_no_normals);
 
 	// for each target spatial cell, find the vertex with the minimal error
-	unsigned int* cell_remap_no_normals = allocator.allocate<unsigned int>(cell_count_no_normals);
+	unsigned int* cell_remap_no_normals = vertex_normals ? allocator.allocate<unsigned int>(cell_count_no_normals) : cell_remap;
 	float* cell_errors = allocator.allocate<float>(cell_count_no_normals);
 	fillCellRemap(cell_remap_no_normals, cell_errors, cell_count_no_normals, vertex_cells_no_normals, cell_quadrics, vertex_positions, vertex_count);
 
-	// copy positions for unfiltered vertices based on the above remap
-	reconcileVertexPositions(vertex_positions_data, vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+	// collapse triangles!
+	// note that we need to filter out triangles that we've already output because we very frequently generate redundant triangles between cells :(
+	// filter triangles with two or more verts in the same spatial cell, regardless of normals
+	size_t filter_tritable_size = hashBuckets2(min_triangles);
+	assert(filter_tritable_size * sizeof(unsigned int) <= tritable_mem_size);
 
-	// average out normals that share a cell
-	Vector3* accumulation_buffer = allocator.allocate<Vector3>(cell_count);
-	writeAverageNormals(vertex_normals, vertex_normals_stride, accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
+	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_ids_no_normals);
+	assert(write == min_triangles * 3);
+
+	if (vertex_normals)
+	{
+		// copy positions for unfiltered vertices based on the above remap
+		reconcileVertexPositions(vertex_positions_data, vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+
+		// average out normals that share a cell
+		Vector3* accumulation_buffer = allocator.allocate<Vector3>(cell_count);
+		writeAverageNormals(vertex_normals, vertex_normals_stride, accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
+	}
 
 #if TRACE
 	printf("result: %d cells, %d triangles (%d unfiltered)\n", int(cell_count), int(write / 3), int(min_triangles));
