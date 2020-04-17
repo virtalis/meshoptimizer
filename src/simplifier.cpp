@@ -23,6 +23,8 @@
 namespace meshopt
 {
 
+typedef unsigned long long VertexID;
+
 struct EdgeAdjacency
 {
 	unsigned int* counts;
@@ -906,16 +908,16 @@ static void remapEdgeLoops(unsigned int* loop, size_t vertex_count, const unsign
 
 struct CellHasher
 {
-	const unsigned int* vertex_ids;
+	const VertexID* vertex_ids;
 
 	size_t hash(unsigned int i) const
 	{
-		unsigned int h = vertex_ids[i];
+		VertexID h = vertex_ids[i];
 
 		// MurmurHash2 finalizer
-		h ^= h >> 13;
-		h *= 0x5bd1e995;
-		h ^= h >> 15;
+		h ^= h >> 47;
+		h *= 0xc6a4a7935bd1e995;
+		h ^= h >> 47;
 		return h;
 	}
 
@@ -927,18 +929,18 @@ struct CellHasher
 
 struct IdHasher
 {
-	size_t hash(unsigned int id) const
+	size_t hash(VertexID id) const
 	{
-		unsigned int h = id;
+		VertexID h = id;
 
 		// MurmurHash2 finalizer
-		h ^= h >> 13;
-		h *= 0x5bd1e995;
-		h ^= h >> 15;
+		h ^= h >> 47;
+		h *= 0xc6a4a7935bd1e995;
+		h ^= h >> 47;
 		return h;
 	}
 
-	bool equal(unsigned int lhs, unsigned int rhs) const
+	bool equal(VertexID lhs, VertexID rhs) const
 	{
 		return lhs == rhs;
 	}
@@ -967,9 +969,9 @@ struct TriangleHasher
 
 struct Triangle
 {
-	unsigned int a;
-	unsigned int b;
-	unsigned int c;
+	VertexID a;
+	VertexID b;
+	VertexID c;
 
 	bool operator==(const Triangle& rhs) const
 	{
@@ -981,8 +983,8 @@ struct MemorylessTriangleHasher
 {
 	size_t hash(const Triangle& tri) const
 	{
-		// Optimized Spatial Hashing for Collision Detection of Deformable Objects
-		return (tri.a * 73856093) ^ (tri.b * 19349663) ^ (tri.c * 83492791);
+		// Optimized Spatial Hashing for Collision Detection of Deformable Objects (with some random 64-bit primes)
+		return (tri.a * 14372678844667432909ull) ^ (tri.b * 3832277515459471913ull) ^ (tri.c * 10359333880808892121ull);
 	}
 
 	bool equal(const Triangle& lhs, const Triangle& rhs) const
@@ -991,9 +993,9 @@ struct MemorylessTriangleHasher
 	}
 };
 
-static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_positions, const float* vertex_normals, size_t vertex_normals_stride, size_t vertex_count, int grid_size)
+static void computeVertexIds(VertexID* vertex_ids, const Vector3* vertex_positions, const float* vertex_normals, size_t vertex_normals_stride, size_t vertex_count, int grid_size)
 {
-	assert(grid_size >= 1 && grid_size <= 256);
+	assert(grid_size >= 1 && grid_size <= (1 << 19));
 	float cell_scale = float(grid_size - 1);
 	size_t normals_stride_floats = vertex_normals_stride / sizeof(float);
 
@@ -1001,9 +1003,9 @@ static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_pos
 	{
 		const Vector3& v = vertex_positions[i];
 
-		int xi = int(v.x * cell_scale + 0.5f);
-		int yi = int(v.y * cell_scale + 0.5f);
-		int zi = int(v.z * cell_scale + 0.5f);
+		VertexID xi = VertexID(v.x * cell_scale + 0.5f);
+		VertexID yi = VertexID(v.y * cell_scale + 0.5f);
+		VertexID zi = VertexID(v.z * cell_scale + 0.5f);
 
 		if (vertex_normals)
 		{
@@ -1012,52 +1014,52 @@ static void computeVertexIds(unsigned int* vertex_ids, const Vector3* vertex_pos
 			// nearly-parallel normals from being merged in more cases (assuming a roughly axis-aligned mesh).
 			const float* np = &vertex_normals[i * normals_stride_floats];
 			Vector3 n = {np[0], np[1], np[2]};
-			assert(fabsf(n.x * n.x + n.y * n.y + n.z * n.z - 1.f) < 1e-5f);
-			int xni = int((n.x + 1.f) * 1.5f - 1e-5);
-			int yni = int((n.y + 1.f) * 1.5f - 1e-5);
-			int zni = int((n.z + 1.f) * 1.5f - 1e-5);
+			assert(fabsf(n.x * n.x + n.y * n.y + n.z * n.z - 1.f) < 1e-3f);
+			VertexID xni = VertexID((n.x + 1.f) * 1.5f - 1e-5);
+			VertexID yni = VertexID((n.y + 1.f) * 1.5f - 1e-5);
+			VertexID zni = VertexID((n.z + 1.f) * 1.5f - 1e-5);
 
-			vertex_ids[i] = (xni << 28) | (yni << 26) | (zni << 24) | (xi << 16) | (yi << 8) | zi;
+			vertex_ids[i] = (xni << 62ull) | (yni << 60ull) | (zni << 57ull) | (xi << 38ull) | (yi << 19ull) | zi;
 		}
 		else
 		{
-			vertex_ids[i] = (xi << 16) | (yi << 8) | zi;
+			vertex_ids[i] = (xi << 38ull) | (yi << 19ull) | zi;
 		}
 	}
 }
 
-static size_t countTriangles(Triangle* tritable, size_t tritable_size, const unsigned int* vertex_ids, const unsigned int* vertex_ids_no_normals, const unsigned int* indices, size_t index_count)
+static size_t countTriangles(Triangle* tritable, size_t tritable_size, const VertexID* vertex_ids, const VertexID* vertex_ids_no_normals, const unsigned int* indices, size_t index_count)
 {
 	size_t result = 0;
 
 	memset(tritable, -1, tritable_size * sizeof(Triangle));
-	const Triangle invalid_triangle = {~0u, ~0u, ~0u};
+	const Triangle invalid_triangle = {~0ull, ~0ull, ~0ull};
 
 	MemorylessTriangleHasher hasher;
 
 	for (size_t i = 0; i < index_count; i += 3)
 	{
 		// Use IDs based on position only to check for degeneracy.
-		unsigned int a2 = vertex_ids_no_normals[indices[i + 0]];
-		unsigned int b2 = vertex_ids_no_normals[indices[i + 1]];
-		unsigned int c2 = vertex_ids_no_normals[indices[i + 2]];
+		VertexID a2 = vertex_ids_no_normals[indices[i + 0]];
+		VertexID b2 = vertex_ids_no_normals[indices[i + 1]];
+		VertexID c2 = vertex_ids_no_normals[indices[i + 2]];
 
 		if (a2 != b2 && a2 != c2 && b2 != c2)
 		{
-			unsigned int a = vertex_ids[indices[i + 0]];
-			unsigned int b = vertex_ids[indices[i + 1]];
-			unsigned int c = vertex_ids[indices[i + 2]];
+			VertexID a = vertex_ids[indices[i + 0]];
+			VertexID b = vertex_ids[indices[i + 1]];
+			VertexID c = vertex_ids[indices[i + 2]];
 			assert(a != b && a != c && b != c);
 
 			// Sort IDs to ensure equivalent triangles compare equal.
 			if (b < a && b < c)
 			{
-				unsigned int t = a;
+				VertexID t = a;
 				a = b, b = c, c = t;
 			}
 			else if (c < a && c < b)
 			{
-				unsigned int t = c;
+				VertexID t = c;
 				c = b, b = a, a = t;
 			}
 
@@ -1076,7 +1078,7 @@ static size_t countTriangles(Triangle* tritable, size_t tritable_size, const uns
 	return result;
 }
 
-static size_t fillVertexCells(unsigned int* table, size_t table_size, unsigned int* vertex_cells, const unsigned int* vertex_ids, size_t vertex_count)
+static size_t fillVertexCells(unsigned int* table, size_t table_size, unsigned int* vertex_cells, const VertexID* vertex_ids, size_t vertex_count)
 {
 	CellHasher hasher = {vertex_ids};
 
@@ -1102,20 +1104,20 @@ static size_t fillVertexCells(unsigned int* table, size_t table_size, unsigned i
 	return result;
 }
 
-static size_t countVertexCells(unsigned int* table, size_t table_size, const unsigned int* vertex_ids, size_t vertex_count)
+static size_t countVertexCells(VertexID* table, size_t table_size, const VertexID* vertex_ids, size_t vertex_count)
 {
 	IdHasher hasher;
 
-	memset(table, -1, table_size * sizeof(unsigned int));
+	memset(table, -1, table_size * sizeof(VertexID));
 
 	size_t result = 0;
 
 	for (size_t i = 0; i < vertex_count; ++i)
 	{
-		unsigned int id = vertex_ids[i];
-		unsigned int* entry = hashLookup2(table, table_size, hasher, id, ~0u);
+		VertexID id = vertex_ids[i];
+		VertexID* entry = hashLookup2(table, table_size, hasher, id, ~0ull);
 
-		result += (*entry == ~0u);
+		result += (*entry == ~0ull);
 		*entry = id;
 	}
 
@@ -1197,7 +1199,7 @@ static void fillBasicCellRemap(unsigned int* cell_remap, size_t cell_count, cons
 	}
 }
 
-static size_t filterTriangles(unsigned int* destination, unsigned int* tritable, size_t tritable_size, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap, const unsigned int* vertex_ids_no_normals)
+static size_t filterTriangles(unsigned int* destination, unsigned int* tritable, size_t tritable_size, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap, const unsigned int* vertex_cells_no_normals)
 {
 	TriangleHasher hasher = {destination};
 
@@ -1207,9 +1209,9 @@ static size_t filterTriangles(unsigned int* destination, unsigned int* tritable,
 
 	for (size_t i = 0; i < index_count; i += 3)
 	{
-		unsigned int id0 = vertex_ids_no_normals[indices[i + 0]];
-		unsigned int id1 = vertex_ids_no_normals[indices[i + 1]];
-		unsigned int id2 = vertex_ids_no_normals[indices[i + 2]];
+		unsigned int id0 = vertex_cells_no_normals[indices[i + 0]];
+		unsigned int id1 = vertex_cells_no_normals[indices[i + 1]];
+		unsigned int id2 = vertex_cells_no_normals[indices[i + 2]];
 
 		if (id0 != id1 && id0 != id2 && id1 != id2)
 		{
@@ -1236,7 +1238,7 @@ static size_t filterTriangles(unsigned int* destination, unsigned int* tritable,
 			destination[result * 3 + 0] = a;
 			destination[result * 3 + 1] = b;
 			destination[result * 3 + 2] = c;
-
+			
 			unsigned int* entry = hashLookup2(tritable, tritable_size, hasher, unsigned(result), ~0u);
 
 			if (*entry == ~0u)
@@ -1480,8 +1482,8 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	printf("target: %d cells, %d triangles\n", int(target_cell_count), int(target_index_count / 3));
 #endif
 
-	unsigned int* vertex_ids = allocator.allocate<unsigned int>(vertex_count);
-	unsigned int* vertex_ids_no_normals = vertex_normals ? allocator.allocate<unsigned int>(vertex_count) : vertex_ids;
+	VertexID* vertex_ids = allocator.allocate<VertexID>(vertex_count);
+	VertexID* vertex_ids_no_normals = vertex_normals ? allocator.allocate<VertexID>(vertex_count) : vertex_ids;
 
 	// allocate tritable to be used both for countTriangles (as Triangle*) and filterTriangles (as unsigned int*)
 	size_t tritable_mem_size = hashBuckets2(index_count / 3) * sizeof(Triangle);
@@ -1491,7 +1493,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 
 	// invariant: # of triangles in min_grid <= target_count
 	int min_grid = 0;
-	int max_grid = 257;
+	int max_grid = (1 << 19) + 1;
 	size_t min_triangles = 0;
 	size_t max_triangles = index_count / 3;
 
@@ -1601,7 +1603,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	size_t filter_tritable_size = hashBuckets2(min_triangles);
 	assert(filter_tritable_size * sizeof(unsigned int) <= tritable_mem_size);
 
-	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_ids_no_normals);
+	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_cells_no_normals);
 	assert(write == min_triangles * 3);
 
 	if (vertex_normals)
@@ -1645,10 +1647,10 @@ size_t meshopt_simplifyPoints(unsigned int* destination, const float* vertex_pos
 	printf("target: %d cells\n", int(target_cell_count));
 #endif
 
-	unsigned int* vertex_ids = allocator.allocate<unsigned int>(vertex_count);
+	VertexID* vertex_ids = allocator.allocate<VertexID>(vertex_count);
 
 	size_t table_size = hashBuckets2(vertex_count);
-	unsigned int* table = allocator.allocate<unsigned int>(table_size);
+	unsigned char* table_mem = allocator.allocate<unsigned char>(table_size * sizeof(VertexID));	
 
 	const int kInterpolationPasses = 5;
 
@@ -1671,7 +1673,7 @@ size_t meshopt_simplifyPoints(unsigned int* destination, const float* vertex_pos
 		grid_size = (grid_size <= min_grid) ? min_grid + 1 : (grid_size >= max_grid) ? max_grid - 1 : grid_size;
 
 		computeVertexIds(vertex_ids, vertex_positions, NULL, 0, vertex_count, grid_size);
-		size_t vertices = countVertexCells(table, table_size, vertex_ids, vertex_count);
+		size_t vertices = countVertexCells((VertexID*)table_mem, table_size, vertex_ids, vertex_count);
 
 #if TRACE
 		printf("pass %d (%s): grid size %d, vertices %d, %s\n",
@@ -1708,7 +1710,7 @@ size_t meshopt_simplifyPoints(unsigned int* destination, const float* vertex_pos
 	unsigned int* vertex_cells = allocator.allocate<unsigned int>(vertex_count);
 
 	computeVertexIds(vertex_ids, vertex_positions, NULL, 0, vertex_count, min_grid);
-	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count);
+	size_t cell_count = fillVertexCells((unsigned int*)table_mem, table_size, vertex_cells, vertex_ids, vertex_count);
 
 	// build a quadric for each target cell
 	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count);
