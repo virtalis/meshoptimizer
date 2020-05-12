@@ -1249,14 +1249,14 @@ static size_t filterTriangles(unsigned int* destination, unsigned int* tritable,
 	return result * 3;
 }
 
-static void reconcileVertexPositions(float* vertex_positions_data, size_t vertex_positions_stride, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap)
+static void reconcileVertexAttribute(float* vertex_data, size_t vertex_size, size_t vertex_stride, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap)
 {
-	unsigned int positions_stride_floats = (unsigned int)(vertex_positions_stride / sizeof(float));
+	unsigned int vertex_stride_floats = (unsigned int)(vertex_stride / sizeof(float));
 	for (size_t i = 0; i < index_count; ++i)
 	{
 		unsigned int vertex = indices[i];
 		unsigned int best_vertex = cell_remap[vertex_cells[vertex]];
-		memcpy(&vertex_positions_data[positions_stride_floats * vertex], &vertex_positions_data[positions_stride_floats * best_vertex], 3 * sizeof(float));
+		memcpy(&vertex_data[vertex_stride_floats * vertex], &vertex_data[vertex_stride_floats * best_vertex], vertex_size);
 	}
 }
 
@@ -1455,7 +1455,9 @@ size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, 
 	return result_count;
 }
 
-size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, float* vertex_positions_data, float* vertex_normals, size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t target_index_count)
+size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, 
+	float* vertex_positions_data, float* vertex_normals, float* vertex_uvs,
+	size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t vertex_uvs_stride, size_t target_index_count)
 {
 	using namespace meshopt;
 
@@ -1463,6 +1465,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	assert(vertex_positions_stride > 0 && vertex_positions_stride <= 256);
 	assert(vertex_positions_stride % sizeof(float) == 0);
 	assert(vertex_normals_stride % sizeof(float) == 0);
+	assert(vertex_uvs_stride % sizeof(float) == 0);
 	assert(target_index_count <= index_count);
 
 	// we expect to get ~2 triangles/vertex in the output
@@ -1609,11 +1612,18 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	if (vertex_normals)
 	{
 		// copy positions for unfiltered vertices based on the above remap
-		reconcileVertexPositions(vertex_positions_data, vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+		reconcileVertexAttribute(vertex_positions_data, 3 * sizeof(float), vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
 
 		// average out normals that share a cell
 		Vector3* accumulation_buffer = allocator.allocate<Vector3>(cell_count);
 		writeAverageNormals(vertex_normals, vertex_normals_stride, accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
+
+		if (vertex_uvs)
+		{
+			// copy UVs for unfiltered vertices based on the remap, to match their positions
+			// only works if the UV map is fully connected
+			reconcileVertexAttribute(vertex_uvs, 2 * sizeof(float), vertex_uvs_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+		}
 	}
 
 #if TRACE
