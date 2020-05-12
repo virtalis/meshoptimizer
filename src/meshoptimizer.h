@@ -280,7 +280,7 @@ MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplify(unsigned int* destination, co
  */
 MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, 
   float* vertex_positions, float* vertex_normals, float* vertex_uvs,
-  size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t vertex_uvs_stride, size_t target_index_count);
+  size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t vertex_uvs_stride, size_t target_index_count, bool uv_islands);
 
 /**
  * Experimental: Point cloud simplifier
