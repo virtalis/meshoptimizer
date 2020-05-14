@@ -1042,7 +1042,7 @@ static void computeVertexIds(VertexID* vertex_ids, const Vector3* vertex_positio
 	}
 }
 
-static size_t countTriangles(Triangle* tritable, size_t tritable_size, const VertexID* vertex_ids, const VertexID* vertex_ids_no_normals, const unsigned int* indices, size_t index_count)
+static size_t countTriangles(Triangle* tritable, size_t tritable_size, const VertexID* vertex_ids, const VertexID* vertex_ids_pos_only, const unsigned int* indices, size_t index_count)
 {
 	size_t result = 0;
 
@@ -1054,9 +1054,9 @@ static size_t countTriangles(Triangle* tritable, size_t tritable_size, const Ver
 	for (size_t i = 0; i < index_count; i += 3)
 	{
 		// Use IDs based on position only to check for degeneracy.
-		VertexID a2 = vertex_ids_no_normals[indices[i + 0]];
-		VertexID b2 = vertex_ids_no_normals[indices[i + 1]];
-		VertexID c2 = vertex_ids_no_normals[indices[i + 2]];
+		VertexID a2 = vertex_ids_pos_only[indices[i + 0]];
+		VertexID b2 = vertex_ids_pos_only[indices[i + 1]];
+		VertexID c2 = vertex_ids_pos_only[indices[i + 2]];
 
 		if (a2 != b2 && a2 != c2 && b2 != c2)
 		{
@@ -1213,7 +1213,7 @@ static void fillBasicCellRemap(unsigned int* cell_remap, size_t cell_count, cons
 	}
 }
 
-static size_t filterTriangles(unsigned int* destination, unsigned int* tritable, size_t tritable_size, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap, const unsigned int* vertex_cells_no_normals)
+static size_t filterTriangles(unsigned int* destination, unsigned int* tritable, size_t tritable_size, const unsigned int* indices, size_t index_count, const unsigned int* vertex_cells, const unsigned int* cell_remap, const unsigned int* vertex_cells_pos_only)
 {
 	TriangleHasher hasher = {destination};
 
@@ -1223,9 +1223,9 @@ static size_t filterTriangles(unsigned int* destination, unsigned int* tritable,
 
 	for (size_t i = 0; i < index_count; i += 3)
 	{
-		unsigned int id0 = vertex_cells_no_normals[indices[i + 0]];
-		unsigned int id1 = vertex_cells_no_normals[indices[i + 1]];
-		unsigned int id2 = vertex_cells_no_normals[indices[i + 2]];
+		unsigned int id0 = vertex_cells_pos_only[indices[i + 0]];
+		unsigned int id1 = vertex_cells_pos_only[indices[i + 1]];
+		unsigned int id2 = vertex_cells_pos_only[indices[i + 2]];
 
 		if (id0 != id1 && id0 != id2 && id1 != id2)
 		{
@@ -1490,6 +1490,9 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 
 	meshopt_Allocator allocator;
 
+	// If true, we will make one full grid and one grid that only considers positions. See big comment below.
+	const bool extra_grid_attributes = (vertex_normals || uv_islands);
+
 	Vector3* vertex_positions = allocator.allocate<Vector3>(vertex_count);
 	rescalePositions(vertex_positions, vertex_positions_data, vertex_count, vertex_positions_stride);
 
@@ -1500,7 +1503,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 #endif
 
 	VertexID* vertex_ids = allocator.allocate<VertexID>(vertex_count);
-	VertexID* vertex_ids_no_normals = vertex_normals ? allocator.allocate<VertexID>(vertex_count) : vertex_ids;
+	VertexID* vertex_ids_pos_only = extra_grid_attributes ? allocator.allocate<VertexID>(vertex_count) : vertex_ids;
 
 	// allocate tritable to be used both for countTriangles (as Triangle*) and filterTriangles (as unsigned int*)
 	size_t tritable_mem_size = hashBuckets2(index_count / 3) * sizeof(Triangle);
@@ -1530,9 +1533,9 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		computeVertexIds(vertex_ids, vertex_positions, vertex_normals, uv_islands, vertex_normals_stride, vertex_count, grid_size);
 		if (vertex_normals)
 		{
-			computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, NULL, 0, vertex_count, grid_size);
+			computeVertexIds(vertex_ids_pos_only, vertex_positions, NULL, NULL, 0, vertex_count, grid_size);
 		}
-		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, vertex_ids_no_normals, indices, index_count);
+		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, vertex_ids_pos_only, indices, index_count);
 		assert(triangles <= index_count / 3);
 
 #if TRACE
@@ -1571,48 +1574,48 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	unsigned int* table = allocator.allocate<unsigned int>(table_size);
 
 	unsigned int* vertex_cells = allocator.allocate<unsigned int>(vertex_count);
-	unsigned int* vertex_cells_no_normals = vertex_normals ? allocator.allocate<unsigned int>(vertex_count) : vertex_cells;
+	unsigned int* vertex_cells_pos_only = vertex_normals ? allocator.allocate<unsigned int>(vertex_count) : vertex_cells;
 
 	computeVertexIds(vertex_ids, vertex_positions, vertex_normals, uv_islands, vertex_normals_stride, vertex_count, min_grid);
 	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count);
-	size_t cell_count_no_normals = cell_count;
+	size_t cell_count_pos_only = cell_count;
 
 	// branching code paths below based on whether or not we have normals:
-	//  - if we do have normals, then:
+	//  - if we do have normals or UV islands, then:
 	//    -- calculate a basic remap first that maps each vertex in a cell
 	//       to the first vertex in that cell. 
-	//    -- ignore normals when choosing the most representative vertex for each spatial cell
+	//    -- ignore normals and UVs when choosing the most representative vertex for each spatial cell
 	//    -- copy that vertex' position onto every normal that is in the same spatial cell.
 	//       This allows us to remove triangles between vertices that share a spatial cell but have
 	//       different normals.
-	//  - if we don't have normals, then:
+	//  - if we don't have normals or UV islands, then:
 	//    -- calculate a remapping that maps each vertex in a cell to the representative vertex
 	//       for that cell
 	//    -- do not modify vertex_positions
 
 	unsigned int* cell_remap = allocator.allocate<unsigned int>(cell_count);
 
-	if (vertex_normals || vertex_uvs)
+	if (extra_grid_attributes)
 	{
 		// get IDs with no normals, so we can ensure vertices in the same spatial cell use the same position
 		// (even if they have different normals).
 		// re-use table...
-		computeVertexIds(vertex_ids_no_normals, vertex_positions, NULL, NULL, 0, vertex_count, min_grid);
-		cell_count_no_normals = fillVertexCells(table, table_size, vertex_cells_no_normals, vertex_ids_no_normals, vertex_count);
+		computeVertexIds(vertex_ids_pos_only, vertex_positions, NULL, NULL, 0, vertex_count, min_grid);
+		cell_count_pos_only = fillVertexCells(table, table_size, vertex_cells_pos_only, vertex_ids_pos_only, vertex_count);
 
 		// build the actual remap table by simply mapping vertices that share a cell (accounting for normals/UVs) to the first vertex in the cell
 		fillBasicCellRemap(cell_remap, cell_count, vertex_cells, vertex_count);
 	}
 
 	// build a quadric for each target spatial cell (ignoring normals/UVs)
-	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count_no_normals);
-	memset(cell_quadrics, 0, cell_count_no_normals * sizeof(Quadric));
-	fillCellQuadrics(cell_quadrics, indices, index_count, vertex_positions, vertex_cells_no_normals);
+	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count_pos_only);
+	memset(cell_quadrics, 0, cell_count_pos_only * sizeof(Quadric));
+	fillCellQuadrics(cell_quadrics, indices, index_count, vertex_positions, vertex_cells_pos_only);
 
 	// for each target spatial cell, find the vertex with the minimal error
-	unsigned int* cell_remap_no_normals = (vertex_normals || vertex_uvs) ? allocator.allocate<unsigned int>(cell_count_no_normals) : cell_remap;
-	float* cell_errors = allocator.allocate<float>(cell_count_no_normals);
-	fillCellRemap(cell_remap_no_normals, cell_errors, cell_count_no_normals, vertex_cells_no_normals, cell_quadrics, vertex_positions, vertex_count);
+	unsigned int* cell_remap_pos_only = extra_grid_attributes ? allocator.allocate<unsigned int>(cell_count_pos_only) : cell_remap;
+	float* cell_errors = allocator.allocate<float>(cell_count_pos_only);
+	fillCellRemap(cell_remap_pos_only, cell_errors, cell_count_pos_only, vertex_cells_pos_only, cell_quadrics, vertex_positions, vertex_count);
 
 	// collapse triangles!
 	// note that we need to filter out triangles that we've already output because we very frequently generate redundant triangles between cells :(
@@ -1620,51 +1623,54 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	size_t filter_tritable_size = hashBuckets2(min_triangles);
 	assert(filter_tritable_size * sizeof(unsigned int) <= tritable_mem_size);
 
-	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_cells_no_normals);
+	size_t write = filterTriangles(destination, (unsigned int*)tritable_mem, filter_tritable_size, indices, index_count, vertex_cells, cell_remap, vertex_cells_pos_only);
 	assert(write == min_triangles * 3);
 
-	if (vertex_normals || vertex_uvs)
+	if (extra_grid_attributes)
 	{
 		// copy positions for unfiltered vertices based on the above remap
-		reconcileVertexAttribute(vertex_positions_data, 3 * sizeof(float), vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+		reconcileVertexAttribute(vertex_positions_data, 3 * sizeof(float), vertex_positions_stride, destination, write, vertex_cells_pos_only, cell_remap_pos_only);
+	}
 
-		if (vertex_normals)
+	if (vertex_normals)
+	{
+		// average out normals that share a cell
+		unsigned char* accumulation_buffer = allocator.allocate<unsigned char>(cell_count * 3 * sizeof(float));
+		writeAverageNormals(vertex_normals, vertex_normals_stride, (Vector3*)accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
+	}
+
+	if (vertex_uvs && extra_grid_attributes)
+	{
+		// Copy UV coordinates around to match the chosen vertex for each cell, which improves texturing quality.
+
+		// If there is a single connected UV island, then these are already equivalent.
+		unsigned int* vertex_cells_pos_uv = vertex_cells_pos_only;
+		unsigned int* cell_remap_pos_uv = cell_remap_pos_only;
+
+		if (uv_islands)
 		{
-			// average out normals that share a cell
-			unsigned char* accumulation_buffer = allocator.allocate<unsigned char>(cell_count * 3 * sizeof(float));
-			writeAverageNormals(vertex_normals, vertex_normals_stride, (Vector3*)accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
-		}
+			// Otherwise, generate a new cell remapping specifically for improving UV quality, using only positions and UV island info.
+			// This achieves a much better quality than if we just used the existing remappings that account for normals.
+			// We can just overwrite a bunch of these buffers at this point rather than allocating yet more memory.
+			VertexID* vertex_ids_pos_uv = vertex_ids;
+			computeVertexIds(vertex_ids_pos_uv, vertex_positions, NULL, uv_islands, 0, vertex_count, min_grid);
 
-		if (vertex_uvs)
-		{
-			// If there is a single connected UV island, then these are already equivalent.
-			unsigned int* vertex_cells_pos_uv = vertex_cells_no_normals;
-			unsigned int* cell_remap_pos_uv = cell_remap_no_normals;
-
-			if (uv_islands)
-			{
-				// Otherwise, generate a new cell remapping specifically for improving UV quality, using only positions and UV island info.
-				// We can just overwrite a bunch of these buffers at this point rather than allocating yet more memory.
-				VertexID* vertex_ids_pos_uv = vertex_ids;
-				computeVertexIds(vertex_ids_pos_uv, vertex_positions, NULL, uv_islands, 0, vertex_count, min_grid);
-
-				size_t cell_count_pos_uv = fillVertexCells(table, table_size, vertex_cells_pos_uv, vertex_ids_pos_uv, vertex_count);
+			size_t cell_count_pos_uv = fillVertexCells(table, table_size, vertex_cells_pos_uv, vertex_ids_pos_uv, vertex_count);
 				
-				// build a quadric for each target cell
-				Quadric* cell_quadrics_pos_uv = allocator.allocate<Quadric>(cell_count_pos_uv);
-				float* cell_errors_pos_uv = allocator.allocate<float>(cell_count_pos_uv);
-				memset(cell_quadrics_pos_uv, 0, cell_count_pos_uv * sizeof(Quadric));
-				fillCellQuadrics(cell_quadrics_pos_uv, indices, index_count, vertex_positions, vertex_cells_pos_uv);
+			// build a quadric for each target cell
+			Quadric* cell_quadrics_pos_uv = allocator.allocate<Quadric>(cell_count_pos_uv);
+			float* cell_errors_pos_uv = allocator.allocate<float>(cell_count_pos_uv);
+			memset(cell_quadrics_pos_uv, 0, cell_count_pos_uv * sizeof(Quadric));
+			fillCellQuadrics(cell_quadrics_pos_uv, indices, index_count, vertex_positions, vertex_cells_pos_uv);
 	
-				// for each target cell, find the vertex with the minimal error
-				assert(cell_count_pos_uv <= cell_count);
-				cell_remap_pos_uv = cell_remap; // This needs to be a bigger buffer.
-				fillCellRemap(cell_remap_pos_uv, cell_errors_pos_uv, cell_count_pos_uv, vertex_cells_pos_uv, cell_quadrics_pos_uv, vertex_positions, vertex_count);
-			}
-
-			// Copy UV coordinates around to match the chosen vertex for each cell, which improves texturing quality.
-			reconcileVertexAttribute(vertex_uvs, 2 * sizeof(float), vertex_uvs_stride, destination, write, vertex_cells_pos_uv, cell_remap_pos_uv);
+			// for each target cell, find the vertex with the minimal error
+			assert(cell_count_pos_uv <= cell_count);
+			cell_remap_pos_uv = cell_remap; // This needs to be a bigger buffer.
+			fillCellRemap(cell_remap_pos_uv, cell_errors_pos_uv, cell_count_pos_uv, vertex_cells_pos_uv, cell_quadrics_pos_uv, vertex_positions, vertex_count);
 		}
+
+		// Do the actual copy.
+		reconcileVertexAttribute(vertex_uvs, 2 * sizeof(float), vertex_uvs_stride, destination, write, vertex_cells_pos_uv, cell_remap_pos_uv);
 	}
 
 #if TRACE
