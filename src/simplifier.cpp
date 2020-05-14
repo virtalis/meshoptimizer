@@ -26,9 +26,9 @@ namespace meshopt
 typedef unsigned long long VertexID;
 
 const unsigned long long POS_GRID_SIZE_BITS = 15;
-const unsigned long long UV_ID_BITS = 11;
+const unsigned long long UV_ID_BITS = 13;
 const unsigned long long NRM_GRID_SIZE_BITS = 2;
-static_assert(POS_GRID_SIZE_BITS * 3 + UV_ID_BITS + NRM_GRID_SIZE_BITS * 2 <= 64, "VertexID overflow");
+static_assert(POS_GRID_SIZE_BITS * 3 + UV_ID_BITS + NRM_GRID_SIZE_BITS * 3 <= 64, "VertexID overflow");
 
 struct EdgeAdjacency
 {
@@ -1628,19 +1628,42 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		// copy positions for unfiltered vertices based on the above remap
 		reconcileVertexAttribute(vertex_positions_data, 3 * sizeof(float), vertex_positions_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
 
-		unsigned char* accumulation_buffer = allocator.allocate<unsigned char>(cell_count * 3 * sizeof(float));
-
 		if (vertex_normals)
 		{
 			// average out normals that share a cell
+			unsigned char* accumulation_buffer = allocator.allocate<unsigned char>(cell_count * 3 * sizeof(float));
 			writeAverageNormals(vertex_normals, vertex_normals_stride, (Vector3*)accumulation_buffer, destination, write, indices, index_count, vertex_cells, cell_count);
 		}
 
-		if (vertex_uvs && !uv_islands)
+		if (vertex_uvs)
 		{
-			// copy UVs for unfiltered vertices based on the remap, to match their positions
-			// this only works when there is a single connected island
-			reconcileVertexAttribute(vertex_uvs, 2 * sizeof(float), vertex_uvs_stride, destination, write, vertex_cells_no_normals, cell_remap_no_normals);
+			// If there is a single connected UV island, then these are already equivalent.
+			unsigned int* vertex_cells_pos_uv = vertex_cells_no_normals;
+			unsigned int* cell_remap_pos_uv = cell_remap_no_normals;
+
+			if (uv_islands)
+			{
+				// Otherwise, generate a new cell remapping specifically for improving UV quality, using only positions and UV island info.
+				// We can just overwrite a bunch of these buffers at this point rather than allocating yet more memory.
+				VertexID* vertex_ids_pos_uv = vertex_ids;
+				computeVertexIds(vertex_ids_pos_uv, vertex_positions, NULL, uv_islands, 0, vertex_count, min_grid);
+
+				size_t cell_count_pos_uv = fillVertexCells(table, table_size, vertex_cells_pos_uv, vertex_ids_pos_uv, vertex_count);
+				
+				// build a quadric for each target cell
+				Quadric* cell_quadrics_pos_uv = allocator.allocate<Quadric>(cell_count_pos_uv);
+				float* cell_errors_pos_uv = allocator.allocate<float>(cell_count_pos_uv);
+				memset(cell_quadrics_pos_uv, 0, cell_count_pos_uv * sizeof(Quadric));
+				fillCellQuadrics(cell_quadrics_pos_uv, indices, index_count, vertex_positions, vertex_cells_pos_uv);
+	
+				// for each target cell, find the vertex with the minimal error
+				assert(cell_count_pos_uv <= cell_count);
+				cell_remap_pos_uv = cell_remap; // This needs to be a bigger buffer.
+				fillCellRemap(cell_remap_pos_uv, cell_errors_pos_uv, cell_count_pos_uv, vertex_cells_pos_uv, cell_quadrics_pos_uv, vertex_positions, vertex_count);
+			}
+
+			// Copy UV coordinates around to match the chosen vertex for each cell, which improves texturing quality.
+			reconcileVertexAttribute(vertex_uvs, 2 * sizeof(float), vertex_uvs_stride, destination, write, vertex_cells_pos_uv, cell_remap_pos_uv);
 		}
 	}
 
