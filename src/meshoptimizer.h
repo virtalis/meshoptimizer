@@ -273,8 +273,10 @@ MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplify(unsigned int* destination, co
  *
  * destination must contain enough space for the target index buffer
  * vertex_positions should have float3 position in the first 12 bytes of each vertex - similar to glVertexPointer
+ * vertex_normals should be null or as above
+ * if vertex_normals is specified, both it and vertex_positions will be modified
  */
-MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count);
+MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, float* vertex_positions, float* vertex_normals, size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t target_index_count);
 
 /**
  * Experimental: Point cloud simplifier
@@ -519,7 +521,7 @@ inline int meshopt_decodeIndexSequence(T* destination, size_t index_count, const
 template <typename T>
 inline size_t meshopt_simplify(T* destination, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count, float target_error);
 template <typename T>
-inline size_t meshopt_simplifySloppy(T* destination, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count);
+inline size_t meshopt_simplifySloppy(T* destination, const T* indices, size_t index_count, float* vertex_positions, float* vertex_normals, size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t target_index_count);
 template <typename T>
 inline size_t meshopt_stripify(T* destination, const T* indices, size_t index_count, size_t vertex_count, T restart_index);
 template <typename T>
@@ -841,12 +843,12 @@ inline size_t meshopt_simplify(T* destination, const T* indices, size_t index_co
 }
 
 template <typename T>
-inline size_t meshopt_simplifySloppy(T* destination, const T* indices, size_t index_count, const float* vertex_positions, size_t vertex_count, size_t vertex_positions_stride, size_t target_index_count)
+inline size_t meshopt_simplifySloppy(T* destination, const T* indices, size_t index_count, float* vertex_positions, float* vertex_normals, size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t target_index_count)
 {
 	meshopt_IndexAdapter<T> in(0, indices, index_count);
 	meshopt_IndexAdapter<T> out(destination, 0, target_index_count);
 
-	return meshopt_simplifySloppy(out.data, in.data, index_count, vertex_positions, vertex_count, vertex_positions_stride, target_index_count);
+	return meshopt_simplifySloppy(out.data, in.data, index_count, vertex_positions, vertex_normals, vertex_count, vertex_positions_stride, vertex_normals_stride, target_index_count);
 }
 
 template <typename T>
