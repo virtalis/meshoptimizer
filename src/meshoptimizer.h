@@ -274,9 +274,15 @@ MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplify(unsigned int* destination, co
  * destination must contain enough space for the target index buffer
  * vertex_positions should have float3 position in the first 12 bytes of each vertex - similar to glVertexPointer
  * vertex_normals should be null or as above
+ * vertex_uvs should be null or have a float2 position in the first 8 bytes
  * if vertex_normals is specified, both it and vertex_positions will be modified
+ * vertex_uvs are not considered while simplifying, but will be modified if either vertex_normals or uv_islands is not null
+ * uv_islands should be null or a precomputed mapping from vertex to the distinct region of UV space it resides in - this guides simplification (but adds a performance cost)
+ * if uv_islands is specified, vertex_positions will be modified
  */
-MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, float* vertex_positions, float* vertex_normals, size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t target_index_count);
+MESHOPTIMIZER_EXPERIMENTAL size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, 
+  float* vertex_positions, float* vertex_normals, float* vertex_uvs,
+  size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t vertex_uvs_stride, size_t target_index_count, const unsigned int* uv_islands);
 
 /**
  * Experimental: Point cloud simplifier
