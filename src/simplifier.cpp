@@ -1042,7 +1042,7 @@ static void computeVertexIds(VertexID* vertex_ids, const Vector3* vertex_positio
 	}
 }
 
-static size_t countTriangles(Triangle* tritable, size_t tritable_size, const VertexID* vertex_ids, const VertexID* vertex_ids_pos_only, const unsigned int* indices, size_t index_count)
+static size_t countTriangles(Triangle* tritable, size_t tritable_size, const VertexID* vertex_ids, const VertexID* vertex_ids_pos_only, const unsigned int* indices, size_t index_count, const bool* locked_vertices)
 {
 	size_t result = 0;
 
@@ -1057,6 +1057,15 @@ static size_t countTriangles(Triangle* tritable, size_t tritable_size, const Ver
 		VertexID a2 = vertex_ids_pos_only[indices[i + 0]];
 		VertexID b2 = vertex_ids_pos_only[indices[i + 1]];
 		VertexID c2 = vertex_ids_pos_only[indices[i + 2]];
+
+		// If one of the vertices in this triangle is locked, add 1 and continue to the next.
+		if (locked_vertices)
+		{
+			if (locked_vertices[indices[i + 0]] || locked_vertices[indices[i + 1]] || locked_vertices[indices[i + 2]])
+			{
+				++result;
+			}
+		}
 
 		if (a2 != b2 && a2 != c2 && b2 != c2)
 		{
@@ -1092,7 +1101,7 @@ static size_t countTriangles(Triangle* tritable, size_t tritable_size, const Ver
 	return result;
 }
 
-static size_t fillVertexCells(unsigned int* table, size_t table_size, unsigned int* vertex_cells, const VertexID* vertex_ids, size_t vertex_count)
+static size_t fillVertexCells(unsigned int* table, size_t table_size, unsigned int* vertex_cells, const VertexID* vertex_ids, size_t vertex_count, const bool* locked_vertices)
 {
 	CellHasher hasher = {vertex_ids};
 
@@ -1103,6 +1112,16 @@ static size_t fillVertexCells(unsigned int* table, size_t table_size, unsigned i
 	for (size_t i = 0; i < vertex_count; ++i)
 	{
 		unsigned int* entry = hashLookup2(table, table_size, hasher, unsigned(i), ~0u);
+
+		// If this vertex was marked as "locked", ignore the hash and vertex id and whatnot, give it it's own cell iod.
+		if (locked_vertices)
+		{
+			if (locked_vertices[i])
+			{
+				vertex_cells[i] = unsigned(result++);
+				continue;
+			}
+		}
 
 		if (*entry == ~0u)
 		{
@@ -1470,11 +1489,10 @@ size_t meshopt_simplify(unsigned int* destination, const unsigned int* indices, 
 }
 
 size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* indices, size_t index_count, 
-	float* vertex_positions_data, float* vertex_normals, float* vertex_uvs,
-	size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t vertex_uvs_stride, size_t target_index_count, const unsigned int* uv_islands)
+	float* vertex_positions_data, float* vertex_normals, float* vertex_uvs, 
+	size_t vertex_count, size_t vertex_positions_stride, size_t vertex_normals_stride, size_t vertex_uvs_stride, size_t target_index_count, const unsigned int* uv_islands, const bool* locked_vertices)
 {
 	using namespace meshopt;
-
 	assert(index_count % 3 == 0);
 	assert(vertex_positions_stride > 0 && vertex_positions_stride <= 256);
 	assert(vertex_positions_stride % sizeof(float) == 0);
@@ -1535,7 +1553,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		{
 			computeVertexIds(vertex_ids_pos_only, vertex_positions, NULL, NULL, 0, vertex_count, grid_size);
 		}
-		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, vertex_ids_pos_only, indices, index_count);
+		size_t triangles = countTriangles((Triangle*)tritable_mem, tritable_mem_size / sizeof(Triangle), vertex_ids, vertex_ids_pos_only, indices, index_count, locked_vertices);
 		assert(triangles <= index_count / 3);
 
 #if TRACE
@@ -1577,7 +1595,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 	unsigned int* vertex_cells_pos_only = vertex_normals ? allocator.allocate<unsigned int>(vertex_count) : vertex_cells;
 
 	computeVertexIds(vertex_ids, vertex_positions, vertex_normals, uv_islands, vertex_normals_stride, vertex_count, min_grid);
-	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count);
+	size_t cell_count = fillVertexCells(table, table_size, vertex_cells, vertex_ids, vertex_count, locked_vertices);
 	size_t cell_count_pos_only = cell_count;
 
 	// branching code paths below based on whether or not we have normals:
@@ -1601,7 +1619,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 		// (even if they have different normals).
 		// re-use table...
 		computeVertexIds(vertex_ids_pos_only, vertex_positions, NULL, NULL, 0, vertex_count, min_grid);
-		cell_count_pos_only = fillVertexCells(table, table_size, vertex_cells_pos_only, vertex_ids_pos_only, vertex_count);
+		cell_count_pos_only = fillVertexCells(table, table_size, vertex_cells_pos_only, vertex_ids_pos_only, vertex_count, locked_vertices);
 
 		// build the actual remap table by simply mapping vertices that share a cell (accounting for normals/UVs) to the first vertex in the cell
 		fillBasicCellRemap(cell_remap, cell_count, vertex_cells, vertex_count);
@@ -1655,7 +1673,7 @@ size_t meshopt_simplifySloppy(unsigned int* destination, const unsigned int* ind
 			VertexID* vertex_ids_pos_uv = vertex_ids;
 			computeVertexIds(vertex_ids_pos_uv, vertex_positions, NULL, uv_islands, 0, vertex_count, min_grid);
 
-			size_t cell_count_pos_uv = fillVertexCells(table, table_size, vertex_cells_pos_uv, vertex_ids_pos_uv, vertex_count);
+			size_t cell_count_pos_uv = fillVertexCells(table, table_size, vertex_cells_pos_uv, vertex_ids_pos_uv, vertex_count, locked_vertices);
 				
 			// build a quadric for each target cell
 			Quadric* cell_quadrics_pos_uv = allocator.allocate<Quadric>(cell_count_pos_uv);
@@ -1767,7 +1785,7 @@ size_t meshopt_simplifyPoints(unsigned int* destination, const float* vertex_pos
 	unsigned int* vertex_cells = allocator.allocate<unsigned int>(vertex_count);
 
 	computeVertexIds(vertex_ids, vertex_positions, NULL, NULL, 0, vertex_count, min_grid);
-	size_t cell_count = fillVertexCells((unsigned int*)table_mem, table_size, vertex_cells, vertex_ids, vertex_count);
+	size_t cell_count = fillVertexCells((unsigned int*)table_mem, table_size, vertex_cells, vertex_ids, vertex_count, NULL);
 
 	// build a quadric for each target cell
 	Quadric* cell_quadrics = allocator.allocate<Quadric>(cell_count);
